@@ -74,4 +74,21 @@ int HeapDumpString(FILE* file, char* str);
 void* Heap_findItem(void* p);
 void Heap_unlink(char* file, int line, void* p);
 
+/** 
+ * Allow us to pass our own memory allocation functions
+ * so that Paho native memory usage is tracked with the
+ * other allocations the agent makes.
+ */
+#if defined(WIN32) || defined(WIN64)
+  #define DLLExport __declspec(dllexport)
+#else
+  #define DLLExport  __attribute__ ((visibility ("default")))
+#endif
+
+typedef unsigned int uint32;
+
+typedef unsigned char* (*alloc_func)(uint32);
+typedef void (*dealloc_func)(unsigned char**);
+DLLExport void Heap_set_allocator(alloc_func allocator, dealloc_func deallocator);
+
 #endif

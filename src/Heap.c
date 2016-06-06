@@ -68,6 +68,71 @@ typedef struct
 static Tree heap;	/**< Tree that holds the allocation records */
 static char* errmsg = "Memory allocation error";
 
+static alloc_func hc_allocator;
+static dealloc_func hc_deallocator;
+
+/*
+ * Allocator function initialization.
+ */
+DLLExport void Heap_set_allocator(alloc_func allocator, dealloc_func deallocator)
+{
+	hc_allocator = allocator;
+	hc_deallocator = deallocator;
+}
+
+/*
+ * Allocate memory using the allocator passed in hc_mem_initialize
+ */
+void* allocate(size_t size)
+{
+	// We need to store the size to support realloc.
+	unsigned char *p = (*hc_allocator)(size + sizeof(size_t));
+	if( NULL == p ) {
+		return NULL;
+	}
+	*((size_t *)p) = size;
+	return p + sizeof(size_t);
+}
+
+/*
+ * Free memory using the deallocator passed in hc_mem_initialize
+ */
+void deallocate(void* block)
+{
+	unsigned char* p = (unsigned char*)block-sizeof(size_t);
+	(*hc_deallocator)(&p);
+}
+
+/*
+ * Reallocates a block of memory.
+ * @param size the new size of the item
+ * @return pointer to the allocated item, or NULL if there was an error
+ */
+void* reallocate(void* p, size_t size)
+{
+	void* new_p;
+	size_t old_size = *((size_t *)p-sizeof(size_t));
+	size_t min_size = old_size < size?old_size:size;
+
+	// Don't re-allocate identical sized blocks.
+	// (We will re-allocate smaller ones to ensure memory
+	// gets freed)
+	if( size == old_size) {
+		return p;
+	}
+
+	new_p = allocate(size);
+	if( NULL == new_p ) {
+		return NULL;
+	}
+
+	memcpy(new_p, p, min_size );
+
+	deallocate(p);
+
+	return new_p;
+}
+
 /**
  * Round allocation size up to a multiple of the size of an int.  Apart from possibly reducing fragmentation,
  * on the old v3 gcc compilers I was hitting some weird behaviour, which might have been errors in
@@ -144,27 +209,27 @@ void* mymalloc(char* file, int line, size_t size)
 
 	Thread_lock_mutex(heap_mutex);
 	size = Heap_roundup(size);
-	if ((s = malloc(sizeof(storageElement))) == NULL)
+	if ((s = (storageElement*)allocate(sizeof(storageElement))) == NULL)
 	{
 		Log(LOG_ERROR, 13, errmsg);
 		return NULL;
 	}
 	s->size = size; /* size without eyecatchers */
-	if ((s->file = malloc(filenamelen)) == NULL)
+	if ((s->file = (char*)allocate(filenamelen)) == NULL)
 	{
 		Log(LOG_ERROR, 13, errmsg);
-		free(s);
+		deallocate(s);
 		return NULL;
 	}
 	space += filenamelen;
 	strcpy(s->file, file);
 	s->line = line;
 	/* Add space for eyecatcher at each end */
-	if ((s->ptr = malloc(size + 2*sizeof(int))) == NULL)
+	if ((s->ptr = allocate(size + 2*sizeof(int))) == NULL)
 	{
 		Log(LOG_ERROR, 13, errmsg);
-		free(s->file);
-		free(s);
+		deallocate(s->file);
+		deallocate(s);
 		return NULL;
 	}
 	space += size + 2*sizeof(int);
@@ -218,10 +283,10 @@ int Internal_heap_unlink(char* file, int line, void* p)
 											 s->size, file, line, state.current_size);
 		checkEyecatchers(file, line, p, s->size);
 		//free(s->ptr);
-		free(s->file);
+		deallocate(s->file);
 		state.current_size -= s->size;
 		TreeRemoveNodeIndex(&heap, e, 0);
-		free(s);
+		deallocate(s);
 		rc = 1;
 	}
 	return rc;
@@ -239,7 +304,7 @@ void myfree(char* file, int line, void* p)
 {
 	Thread_lock_mutex(heap_mutex);
 	if (Internal_heap_unlink(file, line, p))
-		free(((int*)p)-1);
+		deallocate(((int*)p)-1);
 	Thread_unlock_mutex(heap_mutex);
 }
 
@@ -277,7 +342,7 @@ void *myrealloc(char* file, int line, void* p, size_t size)
 	storageElement* s = NULL;
 	
 	Thread_lock_mutex(heap_mutex);
-	s = TreeRemoveKey(&heap, ((int*)p)-1);
+	s = (storageElement*)(TreeRemoveKey(&heap, ((int*)p)-1));
 	if (s == NULL)
 		Log(LOG_ERROR, 13, "Failed to reallocate heap item at file %s line %d", file, line);
 	else
@@ -290,7 +355,7 @@ void *myrealloc(char* file, int line, void* p, size_t size)
 		state.current_size += size - s->size;
 		if (state.current_size > state.max_size)
 			state.max_size = state.current_size;
-		if ((s->ptr = realloc(s->ptr, size + 2*sizeof(int))) == NULL)
+		if ((s->ptr = reallocate(s->ptr, size + 2*sizeof(int))) == NULL)
 		{
 			Log(LOG_ERROR, 13, errmsg);
 			return NULL;
@@ -300,7 +365,7 @@ void *myrealloc(char* file, int line, void* p, size_t size)
 		*(int*)(((char*)(s->ptr)) + (sizeof(int) + size)) = eyecatcher; /* end eyecatcher */
 		s->size = size;
 		space -= strlen(s->file);
-		s->file = realloc(s->file, filenamelen);
+		s->file = (char*)(reallocate(s->file, filenamelen));
 		space += filenamelen;
 		strcpy(s->file, file);
 		s->line = line;
